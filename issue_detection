@@ -1,0 +1,84 @@
+#!/bin/bash
+# shell shock all-clear: compatible to ash dash ksh93 lksh mksh pdksh shish zsh
+
+# Frank inspired me to do this
+# I could have done this but preferred to copy it as I dont have a lot of time and we need to fix this TLS issue soon. 
+# Test peer with openssl for supporting ssl ciphers
+
+# RHEL 5 postfix defaults:
+#   [postfix-2.3.3]$ grep -r DEF src/global/mail_params.h|grep MAND_CIPH
+#   #define DEF_SMTPD_TLS_MAND_CIPH "medium"
+#   #define DEF_SMTP_TLS_MAND_CIPH  "medium"
+#   #define DEF_LMTP_TLS_MAND_CIPH  "medium"
+#   [postfix-2.3.3]$ grep -r DEF_TLS_.*_CLIST src/global/mail_params.h
+#   #define DEF_TLS_HIGH_CLIST      "!EXPORT:!LOW:!MEDIUM:ALL:+RC4:@STRENGTH"
+#   #define DEF_TLS_MEDIUM_CLIST    "!EXPORT:!LOW:ALL:+RC4:@STRENGTH"
+#   #define DEF_TLS_LOW_CLIST       "!EXPORT:ALL:+RC4:@STRENGTH"
+#   #define DEF_TLS_EXPORT_CLIST    "ALL:+RC4:@STRENGTH"
+#   #define DEF_TLS_NULL_CLIST      "!aNULL:eNULL+kRSA"
+# e.g. simulate default RHEL 5 postfix client:
+# SSLCipherSuite=$(openssl ciphers '!EXPORT:!LOW:ALL:+RC4:@STRENGTH'|tr ':' ' ') ./ssltest.sh 127.0.0.1 25 smtp
+
+[ $# -lt 2 ] && {
+  echo "usage: [SSLCipherSuite='ALL:!aNULL'] $0 ip-address port [protocol]   # protocol is i.e. smtp for STARTTLS"
+  echo 'examples:'
+  echo "$0 127.0.0.1 443"
+  echo 'SSLCipherSuite=$(openssl ciphers '\''!EXPORT:!LOW:ALL:+RC4:@STRENGTH'\''|tr ":" " ") '$0' 127.0.0.1 25 smtp'
+  exit 1
+}
+
+SERVER=$1
+PORT=$2
+if [ "$3" ]
+then
+  STARTTLS=-starttls
+  PROT=$3
+fi
+if [ "$SSLCipherSuite" ]
+then
+  CIPHER_SUITE=`echo $SSLCipherSuite|tr ' ' ':'`
+  echo Testing: $SERVER $PORT $PROT $CIPHER_SUITE
+else
+  CIPHER_SUITE="`openssl ciphers 'ALL:eNULL' | tr ' ' ':'`"
+  echo Testing: $SERVER $PORT $PROT
+fi
+
+# protocols
+echo Testing protocols:
+for f in `openssl s_client --help 2>&1|awk '/just use/{if($1!~/dtls/)print$1" "$5}'|sort|tr ' ' ':'`
+do
+  OPTION=`echo $f|cut -d: -f1`
+  SSLPROTOCOL=`echo $f|cut -d: -f2`
+  OUTPUT="`openssl s_client -cipher 'ALL:!NULL' $STARTTLS $PROT -connect $SERVER:$PORT $OPTION 2>&1 </dev/null|grep -A1 Protocol|grep Cipher`"
+  ACT_CIPHER=`echo $OUTPUT|sed 's,.* ,,'|grep -v '0000'|tr -d '()'`
+  if [ "$ACT_CIPHER" ]
+  then
+    echo $SSLPROTOCOL: YES
+    LAST_SUPP_PROTOCOL=$SSLPROTOCOL
+    LAST_SUPP_OPTION=$OPTION
+  else
+    echo $SSLPROTOCOL: NO
+  fi
+  sleep .1
+done
+SSLPROTOCOL=$LAST_SUPP_PROTOCOL
+SSLPROTOCOLOPTION=$LAST_SUPP_OPTION
+
+# ciphers
+echo Testing ciphers using protocol $SSLPROTOCOL
+while true
+do
+  # don't specify protocol and don't do separate checks on every protocol
+  OUTPUT="`openssl s_client -cipher $CIPHER_SUITE $STARTTLS $PROT $SSLPROTOCOLOPTION -connect $SERVER:$PORT 2>&1 </dev/null|egrep -A1 'Server Temp Key|Protocol'|egrep 'Server Temp Key|Cipher'|sed 's,.*Server Temp Key *:* *,,;s, *Cipher *:* *, / ,'`"
+  ACT_CIPHER=`echo $OUTPUT|sed 's,.* ,,'|grep -v '0000'|tr -d '()'`
+  TEMP_KEY=`echo $OUTPUT|sed 's, *\/ .*,,'`
+  if [ "$ACT_CIPHER" ]
+  then
+    echo `openssl ciphers $ACT_CIPHER -v|head -n 1``[ "$TEMP_KEY" ] && echo ' TempKey: '$TEMP_KEY`
+    NEWSUITE=`openssl ciphers $CIPHER_SUITE -v|grep -v "^$ACT_CIPHER "|awk '{print$1}'`
+    CIPHER_SUITE=`echo $NEWSUITE|tr ' ' ':'`
+  else
+    break
+  fi
+  sleep .1
+done
